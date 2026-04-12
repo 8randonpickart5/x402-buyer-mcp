@@ -1,6 +1,6 @@
 {
   "name": "x402-buyer-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Universal x402 buyer agent — discover, pay for, and call any x402 endpoint from Claude Desktop, Cursor, or Claude Code. The missing buyer-side infrastructure for the x402 agent economy.",
   "type": "module",
   "bin": {
