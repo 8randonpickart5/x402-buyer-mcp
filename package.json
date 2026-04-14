@@ -1,35 +1,25 @@
 {
   "name": "x402-buyer-mcp",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Universal x402 buyer agent — discover, pay for, and call any x402 endpoint from Claude Desktop, Cursor, or Claude Code.",
-  "type": "module",
-  "bin": "./index.js",
-  "main": "./index.js",
+  "bin": {
+    "x402-buyer-mcp": "./cli.mjs"
+  },
+  "main": "./cli.mjs",
   "files": [
-    "index.js",
+    "cli.mjs",
     "README.md"
   ],
   "scripts": {
-    "start": "node index.js"
+    "start": "node cli.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "zod": "^3.23.0"
   },
   "keywords": [
-    "mcp",
-    "x402",
-    "agent",
-    "payments",
-    "usdc",
-    "base",
-    "intelligence",
-    "buyer",
-    "agentcash",
-    "ai-agent",
-    "micropayments",
-    "claude",
-    "cursor"
+    "mcp", "x402", "agent", "payments", "usdc", "base",
+    "buyer", "agentcash", "ai-agent", "micropayments", "claude", "cursor"
   ],
   "author": "Alderpost LLC <hello@alderpost.co> (https://www.alderpost.co)",
   "license": "MIT",
