@@ -1,21 +1,21 @@
 {
   "name": "x402-buyer-mcp",
-  "version": "1.0.5",
-  "description": "Universal x402 buyer agent — discover, pay for, and call any x402 endpoint from Claude Desktop, Cursor, or Claude Code.",
+  "version": "2.0.0",
+  "description": "Universal x402 buyer agent — discover, pay for, and call any x402 endpoint from Claude Desktop, Cursor, or Claude Code. Discovery powered by Decixa (5,500+ verified endpoints) with local registry fallback. Payment via AgentCash USDC on Base.",
   "type": "module",
   "bin": {
-    "x402-buyer-mcp": "cli.js"
+    "x402-buyer-mcp": "./cli.js"
   },
   "main": "./cli.js",
   "files": [
-    "cli.mjs",
+    "cli.js",
     "README.md"
   ],
   "scripts": {
-    "start": "node cli.mjs"
+    "start": "node cli.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.12.0",
     "zod": "^3.23.0"
   },
   "keywords": [
@@ -25,12 +25,17 @@
     "payments",
     "usdc",
     "base",
+    "intelligence",
+    "api",
     "buyer",
     "agentcash",
     "ai-agent",
     "micropayments",
     "claude",
-    "cursor"
+    "cursor",
+    "decixa",
+    "discovery",
+    "agent-economy"
   ],
   "author": "Alderpost LLC <hello@alderpost.co> (https://www.alderpost.co)",
   "license": "MIT",

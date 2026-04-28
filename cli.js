@@ -6,13 +6,14 @@
  * An MCP server that lets Claude Desktop, Cursor, or Claude Code users
  * discover, pay for, and call x402 endpoints automatically.
  * 
+ * Discovery powered by Decixa (decixa.ai) with local registry fallback.
+ * Payment handled via AgentCash (agentcash.dev).
+ * 
  * Tools:
- *   x402_discover  — Find x402 endpoints matching a query
+ *   x402_discover  — Find x402 endpoints matching a query (Decixa + local)
  *   x402_call      — Call any x402 endpoint with automatic payment
  *   x402_balance   — Check your AgentCash wallet balance
  *   x402_research  — Multi-endpoint intelligence research (3-5 endpoints in parallel)
- * 
- * Payment handled via AgentCash (agentcash.dev).
  * 
  * @author  Alderpost LLC — Wisconsin
  * @license MIT
@@ -30,12 +31,111 @@ const execAsync = promisify(exec);
 // CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const VERSION = '1.0.3';
+const VERSION = '2.0.0';
 const AGENTCASH_TIMEOUT_MS = 30000;
+const DECIXA_TIMEOUT_MS = 8000;
 const MAX_PARALLEL_CALLS = 5;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ENDPOINT REGISTRY
+// DECIXA DISCOVERY (PRIMARY)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function resolveDecixa(capability, intent, opts = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DECIXA_TIMEOUT_MS);
+
+  try {
+    const res = await fetch('https://api.decixa.ai/api/agent/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        capability: capability.toLowerCase(),
+        intent,
+        constraints: {
+          budget: opts.budget,
+          latency: opts.latency,
+        },
+      }),
+    });
+
+    if (!res.ok) throw new Error(`Decixa HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Map a natural language query to a Decixa capability + intent.
+ * Returns null if no clear mapping — caller should fall back to local.
+ */
+function queryToDecixa(query) {
+  const q = query.toLowerCase();
+
+  // Security / threat / compliance → analyze
+  if (/secur|threat|malware|virus|abuse|blacklist|phish|vuln|ssl|dkim|spf|dmarc|dnssec|compli|audit|owasp|header/.test(q)) {
+    return { capability: 'analyze', intent: query };
+  }
+  // Company / business / firmographics → analyze (Decixa classified these as Analyze)
+  if (/company|business|firmograph|revenue|employee|tech.?stack|industry|enrichment|pdl/.test(q)) {
+    return { capability: 'analyze', intent: query };
+  }
+  // Sales / leads / contacts / email → extract
+  if (/sales|lead|contact|email|prospect|hunter|outreach/.test(q)) {
+    return { capability: 'extract', intent: query };
+  }
+  // Health / drug / FDA / nutrition → analyze
+  if (/health|drug|interact|fda|rxnorm|nutrition|medicine|pharma|recall|adverse/.test(q)) {
+    return { capability: 'analyze', intent: query };
+  }
+  // Property / location / demographics → extract
+  if (/property|location|address|census|demograph|school|amenity|weather|real.?estate|walkab/.test(q)) {
+    return { capability: 'extract', intent: query };
+  }
+  // Sports / betting / odds → analyze
+  if (/sport|betting|odds|nba|nfl|mlb|nhl|mls|epl|soccer|basketball|football|baseball|hockey|game/.test(q)) {
+    return { capability: 'analyze', intent: query };
+  }
+  // Search / find / lookup → search
+  if (/search|find|lookup|discover/.test(q)) {
+    return { capability: 'search', intent: query };
+  }
+  // Generic — try analyze as broadest category
+  return { capability: 'analyze', intent: query };
+}
+
+/**
+ * Convert a Decixa resolve response into our internal endpoint format.
+ */
+function decixaToEndpoints(data) {
+  const endpoints = [];
+  const entries = [];
+
+  if (data.recommended) entries.push(data.recommended);
+  if (data.alternatives?.length) entries.push(...data.alternatives);
+
+  for (const entry of entries) {
+    if (!entry.endpoint) continue;
+    endpoints.push({
+      url: entry.endpoint,
+      name: entry.name || 'Unknown',
+      provider: 'Decixa Discovery',
+      description: `[${entry.capability || 'x402'}] ${entry.tags?.join(', ') || 'Verified x402 endpoint'}. Trust: ${entry.trust_score ?? '?'}/100`,
+      price: entry.pricing?.usdc_per_call ?? 0.10,
+      input: null, // Decixa endpoints have varied inputs — user must provide full URL
+      tags: entry.tags || [],
+      featured: false,
+      source: 'decixa',
+      detail_url: entry.detail_url,
+    });
+  }
+
+  return endpoints;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LOCAL REGISTRY (FALLBACK)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const REGISTRY = [
@@ -48,6 +148,7 @@ const REGISTRY = [
     input: { param: 'domain', type: 'domain', example: 'stripe.com' },
     tags: ['security', 'domain', 'dns', 'ssl', 'malware', 'virustotal', 'email-auth', 'phishing'],
     featured: true,
+    source: 'local',
   },
   {
     url: 'https://www.alderpost.co/api/company-xray',
@@ -58,6 +159,7 @@ const REGISTRY = [
     input: { param: 'domain', type: 'domain', example: 'hubspot.com' },
     tags: ['company', 'business', 'firmographics', 'tech-stack', 'revenue', 'employees', 'pdl', 'enrichment'],
     featured: true,
+    source: 'local',
   },
   {
     url: 'https://www.alderpost.co/api/threat-pulse',
@@ -68,6 +170,7 @@ const REGISTRY = [
     input: { param: 'target', type: 'ip_or_domain', example: '8.8.8.8' },
     tags: ['security', 'threat', 'ip', 'malware', 'abuse', 'blacklist', 'ports', 'virustotal', 'abuseipdb'],
     featured: true,
+    source: 'local',
   },
   {
     url: 'https://www.alderpost.co/api/prospect-iq',
@@ -78,6 +181,7 @@ const REGISTRY = [
     input: { param: 'domain', type: 'domain', example: 'hubspot.com' },
     tags: ['sales', 'leads', 'email', 'contacts', 'hunter', 'prospecting', 'outreach'],
     featured: true,
+    source: 'local',
   },
   {
     url: 'https://www.alderpost.co/api/compliance-check',
@@ -88,6 +192,7 @@ const REGISTRY = [
     input: { param: 'domain', type: 'domain', example: 'stripe.com' },
     tags: ['compliance', 'audit', 'ssl-labs', 'security-headers', 'cookies', 'privacy', 'owasp'],
     featured: true,
+    source: 'local',
   },
   {
     url: 'https://www.alderpost.co/api/health-signal',
@@ -98,6 +203,7 @@ const REGISTRY = [
     input: { param: 'query', type: 'drug_or_food', example: 'ibuprofen' },
     tags: ['health', 'drug', 'fda', 'interactions', 'nutrition', 'recalls', 'rxnorm', 'medical'],
     featured: true,
+    source: 'local',
   },
   {
     url: 'https://www.alderpost.co/api/property-intel',
@@ -108,6 +214,7 @@ const REGISTRY = [
     input: { param: 'address', type: 'address', example: '123 Main St Milwaukee WI' },
     tags: ['property', 'location', 'demographics', 'census', 'weather', 'amenities', 'schools', 'real-estate'],
     featured: true,
+    source: 'local',
   },
   {
     url: 'https://www.alderpost.co/api/sports-edge',
@@ -118,11 +225,12 @@ const REGISTRY = [
     input: { param: 'sport', type: 'sport', example: 'nba' },
     tags: ['sports', 'betting', 'odds', 'nba', 'nfl', 'mlb', 'nhl', 'ai-analysis'],
     featured: true,
+    source: 'local',
   },
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// DISCOVERY ENGINE
+// DISCOVERY ENGINE (Decixa primary → local fallback)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function scoreEndpoint(endpoint, query) {
@@ -152,11 +260,51 @@ function scoreEndpoint(endpoint, query) {
   return score;
 }
 
-function searchRegistry(query) {
+function searchLocal(query) {
   return REGISTRY
     .map(ep => ({ ...ep, relevance: scoreEndpoint(ep, query) }))
     .filter(ep => ep.relevance > 0)
     .sort((a, b) => b.relevance - a.relevance);
+}
+
+async function searchAll(query) {
+  // Try Decixa first
+  const mapping = queryToDecixa(query);
+  let decixaResults = [];
+  let decixaUsed = false;
+
+  try {
+    const data = await resolveDecixa(mapping.capability, mapping.intent, { budget: 1.00 });
+    decixaResults = decixaToEndpoints(data);
+    decixaUsed = true;
+  } catch (err) {
+    console.error(`[decixa] fallback to local: ${err.message}`);
+  }
+
+  // Always include local results
+  const localResults = searchLocal(query);
+
+  // Merge: deduplicate by URL, Decixa results first for non-Alderpost endpoints
+  const seen = new Set();
+  const merged = [];
+
+  // Local (Alderpost) results first — they have richer metadata
+  for (const ep of localResults) {
+    if (!seen.has(ep.url)) {
+      seen.add(ep.url);
+      merged.push(ep);
+    }
+  }
+
+  // Decixa results — add any non-Alderpost endpoints we don't already have
+  for (const ep of decixaResults) {
+    if (!seen.has(ep.url)) {
+      seen.add(ep.url);
+      merged.push(ep);
+    }
+  }
+
+  return { results: merged, decixaUsed };
 }
 
 function detectInputType(subject) {
@@ -217,17 +365,20 @@ const TOOLS = [
     name: 'x402_discover',
     description: `Search for x402 paid API endpoints that can answer a question or provide data.
 
-Searches a curated registry of premium x402 endpoints backed by paid data sources 
-(VirusTotal, People Data Labs, Hunter.io, AbuseIPDB, Qualys SSL Labs, NIH RxNorm, 
-US Census Bureau, OpenWeather, The Odds API).
+Discovery powered by Decixa (5,500+ verified x402 endpoints) with local registry fallback.
+Searches across the entire x402 ecosystem — not just Alderpost endpoints.
+
+Local registry includes premium endpoints backed by VirusTotal, People Data Labs, 
+Hunter.io, AbuseIPDB, Qualys SSL Labs, NIH RxNorm, US Census Bureau, OpenWeather, 
+The Odds API.
 
 Categories: security, company/business, threat intelligence, sales/leads, compliance, 
-health/drug, property/location, sports.
+health/drug, property/location, sports, and any x402 capability indexed by Decixa.
 
 Examples:
-  - query "domain security" → finds Domain Shield (VirusTotal + DNS)
-  - query "company information" → finds Company X-Ray (People Data Labs)
-  - query "email contacts" → finds Prospect IQ (Hunter.io)
+  - query "domain security" → finds Domain Shield + other x402 security scanners
+  - query "company information" → finds Company X-Ray + other enrichment APIs
+  - query "verify factual claims" → finds verification endpoints via Decixa
   - query "drug interactions" → finds Health Signal (NIH RxNorm)
 
 Use x402_call to call any discovered endpoint.`,
@@ -236,7 +387,7 @@ Use x402_call to call any discovered endpoint.`,
       properties: {
         query: {
           type: 'string',
-          description: 'What data do you need? E.g. "domain security", "company revenue", "drug interactions"',
+          description: 'What data do you need? E.g. "domain security", "company revenue", "drug interactions", "verify a claim"',
         },
       },
       required: ['query'],
@@ -257,7 +408,8 @@ Examples:
   - url: "https://www.alderpost.co/api/domain-shield?domain=stripe.com"
   - url: "https://www.alderpost.co/api/company-xray?domain=hubspot.com"
   - url: "https://www.alderpost.co/api/health-signal?query=ibuprofen"
-  - url: "https://www.alderpost.co/api/property-intel?address=123+Main+St+Milwaukee+WI"`,
+  - url: "https://www.alderpost.co/api/property-intel?address=123+Main+St+Milwaukee+WI"
+  - Works with any x402 endpoint URL discovered via x402_discover.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -289,7 +441,7 @@ If AgentCash is not set up, provides instructions to create and fund a wallet.`,
 
 Given a subject (domain, IP, address, drug name, or sport), this tool:
   1. Detects the input type automatically
-  2. Finds all relevant x402 endpoints
+  2. Finds all relevant x402 endpoints (local registry)
   3. Calls up to 5 endpoints simultaneously with automatic payment
   4. Returns all results combined for synthesis
 
@@ -330,7 +482,7 @@ async function handleDiscover(args) {
     return { content: [{ type: 'text', text: 'Query must be at least 2 characters.' }], isError: true };
   }
 
-  const results = searchRegistry(query);
+  const { results, decixaUsed } = await searchAll(query);
 
   if (results.length === 0) {
     return {
@@ -341,12 +493,21 @@ async function handleDiscover(args) {
     };
   }
 
-  const lines = [`Found ${results.length} x402 endpoint(s):\n`];
+  const source = decixaUsed ? 'Decixa + local registry' : 'local registry (Decixa unavailable)';
+  const lines = [`Found ${results.length} x402 endpoint(s) via ${source}:\n`];
+
   for (const ep of results) {
     lines.push(`**${ep.name}** — $${ep.price.toFixed(2)}/call`);
     lines.push(`  ${ep.description}`);
-    lines.push(`  URL: ${ep.url}?${ep.input.param}=${ep.input.example}`);
+    if (ep.input) {
+      lines.push(`  URL: ${ep.url}?${ep.input.param}=${ep.input.example}`);
+    } else {
+      lines.push(`  URL: ${ep.url}`);
+    }
     lines.push(`  Provider: ${ep.provider}${ep.featured ? ' ★' : ''}`);
+    if (ep.detail_url) {
+      lines.push(`  Details: ${ep.detail_url}`);
+    }
     lines.push('');
   }
   lines.push('Use x402_call with the full URL to call any endpoint.');
@@ -415,7 +576,7 @@ async function handleResearch(args) {
     };
   }
 
-  // Find matching endpoints
+  // Find matching endpoints from local registry
   let endpoints;
   if (inputType === 'domain') {
     endpoints = REGISTRY.filter(ep => ep.input.type === 'domain' || ep.input.type === 'ip_or_domain');
@@ -510,12 +671,10 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
-// Register tool list
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: TOOLS,
 }));
 
-// Route tool calls to handlers
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
@@ -536,11 +695,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Connect via stdio
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`x402-buyer-mcp v${VERSION} — ${REGISTRY.length} endpoints in registry`);
+  console.error(`x402-buyer-mcp v${VERSION} — ${REGISTRY.length} local endpoints + Decixa discovery`);
 }
 
 main().catch((err) => {
